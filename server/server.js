@@ -35,9 +35,10 @@ connectDB();
 app.use(cors({
     origin: [
         "http://localhost:5174",
-        "http://192.168.1.6:5174"
+        "http://192.168.1.6:5174",
+        "https://soulmate-chat-seven.vercel.app"
     ],
-    credentials: true
+    credentials: true,
 }));
 app.use(express.json());
 
