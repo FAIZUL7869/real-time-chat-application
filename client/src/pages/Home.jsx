@@ -52,6 +52,11 @@ export default function Home() {
     const selectedUserRef = useRef(null);
     const typingRef = useRef(false);
     const typingTimeoutRef = useRef(null);
+    const [page, setPage] = useState(1);
+    const chatContainerRef = useRef(null);
+    const previousHeightRef = useRef(0);
+    const [loadingMessages, setLoadingMessages] = useState(false);
+    const [hasMore, setHasMore] = useState(true);
     const currentUser = JSON.parse(localStorage.getItem("user"));
     useEffect(() => {
         selectedUserRef.current = selectedUser;
@@ -67,7 +72,7 @@ export default function Home() {
         if (selectedUser) {
             fetchMessages();
         }
-    }, [selectedUser]);
+    }, [selectedUser, page]);
     useEffect(() => {
         const handleVisibilityChange = () => {
             if (!document.hidden && selectedUser) {
@@ -239,11 +244,7 @@ export default function Home() {
     useEffect(() => {
         selectedUserRef.current = selectedUser;
     }, [selectedUser]);
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({
-            behavior: "smooth",
-        });
-    }, [messages]);
+
     const fetchUsers = async () => {
         try {
             const token = localStorage.getItem("token");
@@ -276,13 +277,35 @@ export default function Home() {
         try {
             const token = localStorage.getItem("token");
 
-            const res = await API.get(`/messages/${selectedUser._id}`, {
+            if (page > 1 && chatContainerRef.current) {
+                previousHeightRef.current = chatContainerRef.current.scrollHeight;
+            }
+
+            const res = await API.get(`/messages/${selectedUser._id}?page=${page}`, {
                 headers: {
                     Authorization: `Bearer ${token}`,
                 },
             });
 
-            setMessages(res.data);
+            if (page === 1) {
+                setMessages(res.data);
+            } else {
+                setMessages((prev) => [...res.data, ...prev]);
+
+            }
+
+            if (page > 1) {
+                setTimeout(() => {
+                    if (chatContainerRef.current) {
+                        const newHeight = chatContainerRef.current.scrollHeight;
+                        chatContainerRef.current.scrollTop +=
+                            newHeight - previousHeightRef.current;
+                    }
+                }, 0);
+            }
+            setLoadingMessages(false);
+
+            setHasMore(res.data.length === 30);
             console.log("Messages fetched:", res.data);
             res.data.forEach(async (msg) => {
                 if (msg.sender === selectedUser._id && !msg.seen) {
@@ -299,6 +322,7 @@ export default function Home() {
             });
         } catch (error) {
             console.log(error);
+            setLoadingMessages(false);
         }
     };
     const deleteMessage = async (messageId) => {
@@ -442,6 +466,11 @@ export default function Home() {
             );
             console.log("3. API Response", res);
             setMessages((prev) => [...prev, res.data.data]);
+            setTimeout(() => {
+                messagesEndRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                });
+            }, 50);
             console.log("Reply response:", res.data.data);
             setReplyMessage(null);
             console.log("4. Message added");
@@ -480,6 +509,9 @@ export default function Home() {
                         <div
                             key={user._id}
                             onClick={() => {
+                                setPage(1);
+                                setHasMore(true);
+
                                 setSelectedUser(user);
 
                                 setUnreadCounts((prev) => ({
@@ -554,7 +586,24 @@ export default function Home() {
                     )}
                 </div>
 
-                <div className="flex-1 p-6 overflow-y-auto space-y-3">
+                <div
+                    ref={chatContainerRef}
+                    className="flex-1 p-6 overflow-y-auto space-y-3"
+                    onScroll={(e) => {
+                        console.log("ScrollTop:", e.target.scrollTop);
+
+                        if (
+                            e.target.scrollTop === 0 &&
+                            hasMore
+                        ) {
+                            console.log("Loading next page...");
+                            if (e.target.scrollTop === 0 && hasMore && !loadingMessages) {
+                                setLoadingMessages(true);
+                                setPage((prev) => prev + 1);
+                            }
+                        }
+                    }}
+                >
                     {messages.length === 0 ? (
                         <p className="text-center text-gray-400 mt-10">
                             No messages yet.

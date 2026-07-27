@@ -32,7 +32,13 @@ initializeSocket(io);
 connectDB();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: [
+        "http://localhost:5174",
+        "http://192.168.1.6:5174"
+    ],
+    credentials: true
+}));
 app.use(express.json());
 
 // Routes

@@ -161,6 +161,9 @@ const getMessages = async (req, res) => {
     try {
         const { userId } = req.params;
 
+        const page = parseInt(req.query.page) || 1;
+        const limit = 30;
+
         const messages = await Message.find({
             $or: [
                 { sender: req.user._id, receiver: userId },
@@ -168,9 +171,11 @@ const getMessages = async (req, res) => {
             ],
         })
             .populate("replyTo")
-            .sort({ createdAt: 1 });
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit);
 
-        res.status(200).json(messages);
+        res.status(200).json(messages.reverse());
 
     } catch (error) {
         res.status(500).json({
@@ -178,7 +183,6 @@ const getMessages = async (req, res) => {
         });
     }
 };
-
 // Mark Delivered
 const markDelivered = async (req, res) => {
     try {
