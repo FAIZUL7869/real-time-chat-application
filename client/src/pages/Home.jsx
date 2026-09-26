@@ -1,4 +1,10 @@
-import { FiPaperclip, FiSend, FiMic } from "react-icons/fi";
+import {
+    FiPaperclip,
+    FiSend,
+    FiMic,
+    FiPhone,
+    FiPhoneOff,
+} from "react-icons/fi";
 
 import socket from "../socket/socket";
 import { useEffect, useState, useRef } from "react";
@@ -57,6 +63,34 @@ export default function Home() {
     const previousHeightRef = useRef(0);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [hasMore, setHasMore] = useState(true);
+    // =========================
+    // VOICE CALL STATES
+    // =========================
+
+    const [callStatus, setCallStatus] = useState("idle");
+    // idle | calling | incoming | connected
+
+    const [incomingCall, setIncomingCall] = useState(null);
+    const [callPeerName, setCallPeerName] = useState("");
+
+    const [isMuted, setIsMuted] = useState(false);
+
+    const [callDuration, setCallDuration] = useState(0);
+
+    const peerConnectionRef = useRef(null);
+    const localStreamRef = useRef(null);
+    const remoteAudioRef = useRef(null);
+    const callTimerRef = useRef(null);
+    const callTargetRef = useRef(null);
+    const incomingOfferRef = useRef(null);
+    const pendingIceCandidatesRef = useRef([]);
+    const rtcConfig = {
+        iceServers: [
+            {
+                urls: "stun:stun.l.google.com:19302",
+            },
+        ],
+    };
     const currentUser = JSON.parse(localStorage.getItem("user"));
     useEffect(() => {
         selectedUserRef.current = selectedUser;
@@ -223,6 +257,132 @@ export default function Home() {
                 prev.filter((msg) => msg._id !== messageId)
             );
         });
+        // =========================
+        // VOICE CALL LISTENERS
+        // =========================
+
+        socket.on("incomingCall", ({ callerId, callerName }) => {
+            console.log("📞 Incoming call from:", callerId);
+
+            setIncomingCall({
+                callerId,
+                callerName,
+            });
+            setCallPeerName(callerName || "Voice Call");
+
+            setCallStatus("incoming");
+        });
+        socket.on("webrtcOffer", ({ callerId, receiverId, offer }) => {
+            console.log("📡 WebRTC offer received from:", callerId);
+
+            incomingOfferRef.current = {
+                callerId,
+                receiverId,
+                offer,
+            };
+
+            console.log("✅ Offer stored. Waiting for user to accept.");
+        });
+
+        socket.on("webrtcAnswer", async ({ receiverId, answer }) => {
+            console.log("📡 WebRTC answer received");
+
+            try {
+                if (!peerConnectionRef.current) {
+                    console.log("❌ No peer connection found");
+                    return;
+                }
+
+                await peerConnectionRef.current.setRemoteDescription(
+                    new RTCSessionDescription(answer)
+                );
+
+                console.log("✅ Remote description set");
+                if (pendingIceCandidatesRef.current.length > 0) {
+                    for (const candidate of pendingIceCandidatesRef.current) {
+                        await peerConnectionRef.current.addIceCandidate(
+                            new RTCIceCandidate(candidate)
+                        );
+                    }
+
+                    pendingIceCandidatesRef.current = [];
+
+                    console.log("🧊 Pending ICE candidates added");
+                }
+            } catch (error) {
+                console.error("❌ Error handling WebRTC answer:", error);
+            }
+        });
+        socket.on("iceCandidate", async ({ senderId, receiverId, candidate }) => {
+            console.log("🧊 ICE candidate received from:", senderId);
+
+            try {
+                if (!peerConnectionRef.current) {
+                    console.log("⏳ Peer connection not ready. Storing ICE candidate.");
+
+                    pendingIceCandidatesRef.current.push(candidate);
+
+                    return;
+                }
+
+                if (!peerConnectionRef.current.remoteDescription) {
+                    console.log("⏳ Remote description not ready. Storing ICE candidate.");
+
+                    pendingIceCandidatesRef.current.push(candidate);
+
+                    return;
+                }
+
+                await peerConnectionRef.current.addIceCandidate(
+                    new RTCIceCandidate(candidate)
+                );
+
+                console.log("🧊 ICE candidate added");
+            } catch (error) {
+                console.error("❌ Error adding ICE candidate:", error);
+            }
+        });
+        socket.on("callUnavailable", () => {
+            console.log("📵 User is unavailable");
+
+            alert("User is currently offline.");
+
+            endVoiceCall(false);
+        });
+
+        socket.on("callCancelled", () => {
+            console.log("📞 Incoming call cancelled");
+
+            setIncomingCall(null);
+            setCallStatus("idle");
+
+            incomingOfferRef.current = null;
+            callTargetRef.current = null;
+
+            pendingIceCandidatesRef.current = [];
+        });
+
+        socket.on("callAccepted", ({ receiverId }) => {
+            console.log("✅ Call accepted by:", receiverId);
+
+            setCallStatus("calling");
+
+            console.log("📞 Receiver accepted the call");
+        });
+
+        socket.on("callDeclined", () => {
+            console.log("❌ Call declined");
+
+            alert("Call declined.");
+
+            endVoiceCall(false);
+        });
+
+        socket.on("callEnded", () => {
+            console.log("☎️ Call ended by other user");
+
+            endVoiceCall(false);
+        });
         return () => {
             socket.off("connect");
             socket.off("receiveMessage");
@@ -232,6 +392,15 @@ export default function Home() {
             socket.off("messageDelivered");
             socket.off("messageSeen");
             socket.off("messageDeleted");
+            socket.off("incomingCall");
+            socket.off("callUnavailable");
+            socket.off("callCancelled");
+            socket.off("callAccepted");
+            socket.off("callDeclined");
+            socket.off("callEnded");
+            socket.off("iceCandidate");
+            socket.off("webrtcOffer");
+            socket.off("webrtcAnswer");
             socket.disconnect();
         };
     }, []);
@@ -324,6 +493,361 @@ export default function Home() {
             console.log(error);
             setLoadingMessages(false);
         }
+    };
+    // =========================
+    // CREATE WEBRTC CONNECTION
+    // =========================
+
+    const createPeerConnection = (targetUserId) => {
+        const peerConnection = new RTCPeerConnection(rtcConfig);
+
+        peerConnectionRef.current = peerConnection;
+
+        // Send our ICE candidates to the other user
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit("iceCandidate", {
+                    senderId: currentUser._id,
+                    receiverId: targetUserId,
+                    candidate: event.candidate,
+                });
+            }
+        };
+
+        // Receive the other user's audio
+        peerConnection.ontrack = (event) => {
+            console.log("🔊 Remote audio received");
+
+            if (remoteAudioRef.current) {
+                remoteAudioRef.current.srcObject = event.streams[0];
+
+                remoteAudioRef.current
+                    .play()
+                    .catch((error) => {
+                        console.log(
+                            "Audio playback waiting for user interaction:",
+                            error
+                        );
+                    });
+            }
+        };
+
+        // Monitor WebRTC connection
+        peerConnection.onconnectionstatechange = () => {
+            console.log(
+                "📡 WebRTC connection:",
+                peerConnection.connectionState
+            );
+
+            if (
+                peerConnection.connectionState === "connected"
+            ) {
+                console.log("🎉 Voice call connected");
+
+                setCallStatus("connected");
+                startCallTimer();
+            }
+
+            if (
+                peerConnection.connectionState === "failed" ||
+                peerConnection.connectionState === "disconnected" ||
+                peerConnection.connectionState === "closed"
+            ) {
+                console.log("📴 WebRTC connection ended");
+
+                endVoiceCall(false);
+            }
+        };
+
+        // Add our microphone tracks
+        if (localStreamRef.current) {
+            localStreamRef.current
+                .getTracks()
+                .forEach((track) => {
+                    peerConnection.addTrack(
+                        track,
+                        localStreamRef.current
+                    );
+                });
+        }
+
+        return peerConnection;
+    };
+    // =========================
+    // CALL TIMER
+    // =========================
+
+    const startCallTimer = () => {
+        clearInterval(callTimerRef.current);
+
+        setCallDuration(0);
+
+        callTimerRef.current = setInterval(() => {
+            setCallDuration((prev) => prev + 1);
+        }, 1000);
+    };
+
+    const stopCallTimer = () => {
+        if (callTimerRef.current) {
+            clearInterval(callTimerRef.current);
+            callTimerRef.current = null;
+        }
+
+        setCallDuration(0);
+    };
+    // =========================
+    // START VOICE CALL
+    // =========================
+
+    const startVoiceCall = async () => {
+        if (!selectedUser) {
+            return;
+        }
+
+        if (callStatus !== "idle") {
+            return;
+        }
+
+        console.log("📞 Starting voice call...");
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            });
+
+            localStreamRef.current = stream;
+
+            callTargetRef.current = selectedUser._id;
+            setCallPeerName(selectedUser.name);
+            setCallStatus("calling");
+            setCallDuration(0);
+
+            const peerConnection = createPeerConnection(
+                selectedUser._id
+            );
+
+            const offer = await peerConnection.createOffer();
+
+            await peerConnection.setLocalDescription(offer);
+
+            socket.emit("callUser", {
+                callerId: currentUser._id,
+                receiverId: selectedUser._id,
+                callerName: currentUser.name,
+            });
+
+            socket.emit("webrtcOffer", {
+                callerId: currentUser._id,
+                receiverId: selectedUser._id,
+                offer,
+            });
+
+            console.log("📡 WebRTC offer sent");
+        } catch (error) {
+            console.error("❌ Could not start voice call:", error);
+
+            if (localStreamRef.current) {
+                localStreamRef.current
+                    .getTracks()
+                    .forEach((track) => track.stop());
+
+                localStreamRef.current = null;
+            }
+
+            setCallStatus("idle");
+            callTargetRef.current = null;
+
+            alert(
+                "Microphone access is required to make a voice call."
+            );
+        }
+    };
+    // =========================
+    // ACCEPT VOICE CALL
+    // =========================
+
+    const acceptCall = async () => {
+        if (!incomingCall) {
+            return;
+        }
+
+        if (!incomingOfferRef.current) {
+            console.log("❌ No WebRTC offer available");
+            return;
+        }
+
+        console.log("✅ Accepting voice call...");
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            });
+
+            localStreamRef.current = stream;
+
+            const {
+                callerId,
+                receiverId,
+                offer,
+            } = incomingOfferRef.current;
+
+            callTargetRef.current = callerId;
+
+            const peerConnection = createPeerConnection(callerId);
+
+            await peerConnection.setRemoteDescription(
+                new RTCSessionDescription(offer)
+            );
+            if (pendingIceCandidatesRef.current.length > 0) {
+                for (const candidate of pendingIceCandidatesRef.current) {
+                    await peerConnection.addIceCandidate(
+                        new RTCIceCandidate(candidate)
+                    );
+                }
+
+                pendingIceCandidatesRef.current = [];
+
+                console.log("🧊 Pending ICE candidates added");
+            }
+            const answer = await peerConnection.createAnswer();
+
+            await peerConnection.setLocalDescription(answer);
+
+            socket.emit("acceptCall", {
+                callerId,
+                receiverId: currentUser._id,
+            });
+
+            socket.emit("webrtcAnswer", {
+                callerId,
+                receiverId,
+                answer,
+            });
+
+            setIncomingCall(null);
+            setCallStatus("calling");
+
+            console.log("📡 WebRTC answer sent");
+            console.log("📞 Call accepted successfully");
+
+        } catch (error) {
+            console.error("❌ Error accepting call:", error);
+
+            if (localStreamRef.current) {
+                localStreamRef.current
+                    .getTracks()
+                    .forEach((track) => track.stop());
+
+                localStreamRef.current = null;
+            }
+
+            setCallStatus("idle");
+            setIncomingCall(null);
+            callTargetRef.current = null;
+            incomingOfferRef.current = null;
+            pendingIceCandidatesRef.current = [];
+
+            alert("Microphone access is required to answer the call.");
+        }
+    };
+    // =========================
+    // DECLINE VOICE CALL
+    // =========================
+
+    const declineCall = () => {
+        if (!incomingCall) {
+            return;
+        }
+
+        console.log("❌ Declining voice call...");
+
+        const callerId = incomingCall.callerId;
+
+        socket.emit("declineCall", {
+            callerId: callerId,
+            receiverId: currentUser._id,
+        });
+
+        setIncomingCall(null);
+        setCallStatus("idle");
+
+        incomingOfferRef.current = null;
+        callTargetRef.current = null;
+        pendingIceCandidatesRef.current = [];
+        console.log("📞 Call declined");
+    };
+    // =========================
+    // END VOICE CALL
+    // =========================
+
+    const endVoiceCall = (notifyOtherUser = true) => {
+        console.log("☎️ Ending voice call...");
+
+        const targetUserId = callTargetRef.current;
+
+        // Stop microphone
+        if (localStreamRef.current) {
+            localStreamRef.current
+                .getTracks()
+                .forEach((track) => track.stop());
+
+            localStreamRef.current = null;
+        }
+
+        // Close WebRTC connection
+        if (peerConnectionRef.current) {
+            peerConnectionRef.current.close();
+            peerConnectionRef.current = null;
+        }
+
+        // Stop call timer
+        stopCallTimer();
+
+        // Notify the other user
+        if (notifyOtherUser && targetUserId) {
+            socket.emit("endCall", {
+                callerId: currentUser._id,
+                receiverId: targetUserId,
+            });
+        }
+
+        // Reset call state
+        setCallStatus("idle");
+        setIncomingCall(null);
+        setIsMuted(false);
+        setCallPeerName("");
+
+        callTargetRef.current = null;
+        incomingOfferRef.current = null;
+        pendingIceCandidatesRef.current = [];
+
+        console.log("☎️ Voice call ended");
+    };
+    // =========================
+    // TOGGLE MUTE
+    // =========================
+
+    const toggleMute = () => {
+        if (!localStreamRef.current) {
+            return;
+        }
+
+        const audioTrack = localStreamRef.current
+            .getAudioTracks()[0];
+
+        if (!audioTrack) {
+            return;
+        }
+
+        audioTrack.enabled = !audioTrack.enabled;
+
+        setIsMuted(!audioTrack.enabled);
+
+        console.log(
+            audioTrack.enabled
+                ? "🎤 Microphone unmuted"
+                : "🔇 Microphone muted"
+        );
     };
     const deleteMessage = async (messageId) => {
         try {
@@ -490,7 +1014,122 @@ export default function Home() {
     };
     return (
         <div className="h-screen bg-slate-100 flex">
+            {/* =========================
+    INCOMING CALL POPUP
+========================= */}
 
+            {callStatus === "incoming" && incomingCall && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]">
+
+                    <div className="bg-white rounded-2xl shadow-2xl p-8 w-80 text-center">
+
+                        <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <FiPhone
+                                size={36}
+                                className="text-green-600"
+                            />
+                        </div>
+
+                        <h2 className="text-xl font-bold text-gray-800">
+                            Incoming Call
+                        </h2>
+
+                        <p className="text-gray-500 mt-2">
+                            {incomingCall.callerName || "Someone"} is calling you
+                        </p>
+
+                        <div className="flex justify-center gap-6 mt-6">
+
+                            {/* DECLINE */}
+                            <button
+                                onClick={declineCall}
+                                className="bg-red-500 hover:bg-red-600 text-white p-4 rounded-full transition"
+                                title="Decline"
+                            >
+                                <FiPhoneOff size={24} />
+                            </button>
+
+                            {/* ACCEPT */}
+                            <button
+                                onClick={acceptCall}
+                                className="bg-green-500 hover:bg-green-600 text-white p-4 rounded-full transition"
+                                title="Accept"
+                            >
+                                <FiPhone size={24} />
+                            </button>
+
+                        </div>
+
+                    </div>
+
+                </div>
+            )}
+            {/* =========================
+    ACTIVE VOICE CALL SCREEN
+========================= */}
+
+            {(callStatus === "calling" || callStatus === "connected") && (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[90]">
+
+                    <div className="bg-white rounded-3xl shadow-2xl p-8 w-80 text-center">
+
+                        <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5">
+                            <FiPhone
+                                size={40}
+                                className="text-green-600"
+                            />
+                        </div>
+
+                        <h2 className="text-2xl font-bold text-gray-800">
+                            {callPeerName || selectedUser?.name || "Voice Call"}
+                        </h2>
+
+                        <p className="text-gray-500 mt-2">
+                            {callStatus === "calling"
+                                ? "Calling..."
+                                : `${String(Math.floor(callDuration / 60)).padStart(2, "0")}:${String(callDuration % 60).padStart(2, "0")}`}
+                        </p>
+
+                        <div className="flex justify-center gap-6 mt-8">
+
+                            {/* MUTE */}
+                            <button
+                                onClick={toggleMute}
+                                className={`p-4 rounded-full transition ${isMuted
+                                    ? "bg-red-500 text-white"
+                                    : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                    }`}
+                                title={isMuted ? "Unmute" : "Mute"}
+                            >
+                                <FiMic size={24} />
+                            </button>
+
+                            {/* END CALL */}
+                            <button
+                                onClick={() => {
+                                    if (callStatus === "calling" && callTargetRef.current) {
+                                        socket.emit("cancelCall", {
+                                            callerId: currentUser._id,
+                                            receiverId: callTargetRef.current,
+                                        });
+
+                                        endVoiceCall(false);
+                                    } else {
+                                        endVoiceCall(true);
+                                    }
+                                }}
+                                className="bg-red-500 hover:bg-red-600 text-white p-4 rounded-full transition"
+                                title="End call"
+                            >
+                                <FiPhoneOff size={24} />
+                            </button>
+
+                        </div>
+
+                    </div>
+
+                </div>
+            )}
             {/* Sidebar */}
             <div className="w-[320px] bg-white shadow-lg flex flex-col">
 
@@ -563,27 +1202,41 @@ export default function Home() {
             {/* Chat Area */}
             <div className="flex-1 flex flex-col">
 
-                <div className="bg-white shadow p-5">
-                    <h2 className="font-bold text-xl">
-                        {selectedUser ? selectedUser.name : "Select a user"}
-                    </h2>
+                <div className="bg-white shadow p-5 flex items-center justify-between">
 
-                    {selectedUser && (
-                        <p
-                            className={`text-sm ${typingUser === selectedUser._id
-                                ? "text-blue-600"
-                                : onlineUsers.includes(selectedUser._id)
-                                    ? "text-green-600"
-                                    : "text-gray-500"
-                                }`}
+                    <div>
+                        <h2 className="font-bold text-xl">
+                            {selectedUser ? selectedUser.name : "Select a user"}
+                        </h2>
+
+                        {selectedUser && (
+                            <p
+                                className={`text-sm ${typingUser === selectedUser._id
+                                    ? "text-blue-600"
+                                    : onlineUsers.includes(selectedUser._id)
+                                        ? "text-green-600"
+                                        : "text-gray-500"
+                                    }`}
+                            >
+                                {typingUser === selectedUser._id
+                                    ? "Typing..."
+                                    : onlineUsers.includes(selectedUser._id)
+                                        ? "🟢 Online"
+                                        : formatLastSeen(selectedUser.lastSeen)}
+                            </p>
+                        )}
+                    </div>
+
+                    {selectedUser && callStatus === "idle" && (
+                        <button
+                            onClick={startVoiceCall}
+                            className="bg-green-500 hover:bg-green-600 text-white p-3 rounded-full transition"
+                            title="Voice call"
                         >
-                            {typingUser === selectedUser._id
-                                ? "Typing..."
-                                : onlineUsers.includes(selectedUser._id)
-                                    ? "🟢 Online"
-                                    : formatLastSeen(selectedUser.lastSeen)}
-                        </p>
+                            <FiPhone size={20} />
+                        </button>
                     )}
+
                 </div>
 
                 <div
@@ -903,6 +1556,15 @@ export default function Home() {
                 </div>
 
             </div>
+
+            {/* =========================
+                REMOTE CALL AUDIO
+            ========================= */}
+
+            <audio
+                ref={remoteAudioRef}
+                autoPlay
+            />
 
         </div>
     );

@@ -58,6 +58,152 @@ const initializeSocket = (socketIO) => {
                 });
             }
         });
+        // =========================
+        // VOICE CALL SIGNALING
+        // =========================
+
+        // Caller starts a call
+        socket.on("callUser", ({ callerId, receiverId, callerName }) => {
+            console.log(
+                "📞 Call request:",
+                callerId,
+                "->",
+                receiverId
+            );
+
+            const receiverSocket = onlineUsers.get(receiverId);
+
+            if (receiverSocket) {
+                io.to(receiverSocket).emit("incomingCall", {
+                    callerId,
+                    callerName,
+                });
+            } else {
+                socket.emit("callUnavailable", {
+                    receiverId,
+                });
+            }
+        });
+
+        // Caller cancels the call before it is accepted
+        socket.on("cancelCall", ({ callerId, receiverId }) => {
+            console.log(
+                "📞 Call cancelled:",
+                callerId,
+                "->",
+                receiverId
+            );
+
+            const receiverSocket = onlineUsers.get(receiverId);
+
+            if (receiverSocket) {
+                io.to(receiverSocket).emit("callCancelled", {
+                    callerId,
+                });
+            }
+        });
+
+        // Receiver accepts the call
+        socket.on("acceptCall", ({ callerId, receiverId }) => {
+            console.log(
+                "✅ Call accepted:",
+                receiverId,
+                "->",
+                callerId
+            );
+
+            const callerSocket = onlineUsers.get(callerId);
+
+            if (callerSocket) {
+                io.to(callerSocket).emit("callAccepted", {
+                    receiverId,
+                });
+            }
+        });
+
+        // Receiver declines the call
+        socket.on("declineCall", ({ callerId, receiverId }) => {
+            console.log(
+                "❌ Call declined:",
+                receiverId,
+                "->",
+                callerId
+            );
+
+            const callerSocket = onlineUsers.get(callerId);
+
+            if (callerSocket) {
+                io.to(callerSocket).emit("callDeclined", {
+                    receiverId,
+                });
+            }
+        });
+
+        // =========================
+        // WEBRTC SIGNALING
+        // =========================
+
+        // Send WebRTC offer
+        socket.on("webrtcOffer", ({ callerId, receiverId, offer }) => {
+            console.log("📡 WebRTC offer:", callerId, "->", receiverId);
+
+            const receiverSocket = onlineUsers.get(receiverId);
+
+            if (receiverSocket) {
+                io.to(receiverSocket).emit("webrtcOffer", {
+                    callerId,
+                    receiverId,
+                    offer,
+                });
+            }
+        });
+
+        // Send WebRTC answer
+        socket.on("webrtcAnswer", ({ callerId, receiverId, answer }) => {
+            console.log("📡 WebRTC answer:", receiverId, "->", callerId);
+
+            const callerSocket = onlineUsers.get(callerId);
+
+            if (callerSocket) {
+                io.to(callerSocket).emit("webrtcAnswer", {
+                    receiverId,
+                    answer,
+                });
+            }
+        });
+
+        // Exchange ICE candidates
+        socket.on("iceCandidate", ({ senderId, receiverId, candidate }) => {
+            console.log("🧊 ICE candidate:", senderId, "->", receiverId);
+
+            const receiverSocket = onlineUsers.get(receiverId);
+
+            if (receiverSocket) {
+                io.to(receiverSocket).emit("iceCandidate", {
+                    senderId,
+                    receiverId,
+                    candidate,
+                });
+            }
+        });
+
+        // End active call
+        socket.on("endCall", ({ callerId, receiverId }) => {
+            console.log(
+                "☎️ Call ended:",
+                callerId,
+                "->",
+                receiverId
+            );
+
+            const receiverSocket = onlineUsers.get(receiverId);
+
+            if (receiverSocket) {
+                io.to(receiverSocket).emit("callEnded", {
+                    callerId,
+                });
+            }
+        });
         // User disconnects
         socket.on("disconnect", async () => {
             for (const [userId, socketId] of onlineUsers.entries()) {
