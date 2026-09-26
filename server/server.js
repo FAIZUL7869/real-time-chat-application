@@ -36,7 +36,8 @@ app.use(cors({
     origin: [
         "http://localhost:5174",
         "http://192.168.1.6:5174",
-        "https://soulmate-chat-seven.vercel.app"
+        "https://soulmate-chat-seven.vercel.app",
+        "https://soulmate-chat-git-voice-calling-faizul7869s-projects.vercel.app"
     ],
     credentials: true,
 }));
